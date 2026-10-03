@@ -7,5 +7,6 @@ pypdf
 ddgs
 requests
 python-dotenv
-reportlab   # Person 2 PDF generation (reproducible builds)
+reportlab   # knowledge-base PDF generation (reproducible builds)
+python-docx   # knowledge_base/source/build_docx.py
 pytest

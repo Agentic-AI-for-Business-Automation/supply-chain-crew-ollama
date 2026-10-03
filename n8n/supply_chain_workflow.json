@@ -5,6 +5,7 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "supply-chain-rfq",
+        "authentication": "headerAuth",
         "responseMode": "responseNode",
         "options": {}
       },
@@ -16,14 +17,20 @@
         0,
         0
       ],
-      "webhookId": "supply-chain-rfq-webhook"
+      "webhookId": "supply-chain-rfq-webhook",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "scmwebhooktoken01",
+          "name": "SCM webhook token"
+        }
+      }
     },
     {
       "parameters": {
-        "jsCode": "// Expects webhook body at $input.first().json.body (n8n Webhook node default).\n// Contract: action_type, severity, event_id, company, rfqs[], contingency_actions[], policy_citations[].\nconst raw = $input.first().json || {};\nconst p = raw.body ?? raw; // tolerate test-posts that omit the {body:} wrapper\nconst fmt = n => Number(n || 0).toLocaleString('en-IN');\nconst eventId = p.event_id || `SCD-MANUAL-${Date.now().toString().slice(-6)}`;\nconst rfqDocs = (Array.isArray(p.rfqs) ? p.rfqs : []).map((r, i) => {\n  const qty = Number(r.quantity || 0);\n  const price = Number(r.unit_price_inr || 0);\n  return {\n    rfq_number: `${eventId}-RFQ${String(i + 1).padStart(2, '0')}`,\n    to: r.supplier_email || `${r.supplier_id || 'unknown'}@supplier.example`,\n    subject: `Urgent RFQ ${r.part_id || '?'} x ${fmt(qty)} - ${p.company || 'Aravalli Mobility Pvt Ltd'}`,\n    body: `Dear ${r.supplier_name || r.supplier_id || 'Supplier'},\\n\\nPlease quote for ${fmt(qty)} units of ${r.part_id || '?'} ` +\n      `for delivery within ${r.required_within_days ?? '?'} days (CIF Nhava Sheva / DAP Manesar). ` +\n      `Quote validity 15 days; state lead time, MOQ and capacity commitment.\\n\\nReason: ${r.justification || 'per SOP-SC-014'}\\n\\nProcurement, ${p.company || 'Aravalli Mobility Pvt Ltd'}`,\n    est_value_inr: Number(r.est_value_inr ?? qty * price)\n  };\n});\nconst total = rfqDocs.reduce((s, r) => s + Number(r.est_value_inr || 0), 0);\nif (!['RFQ','CONTINGENCY_PLAN','MONITOR_ONLY'].includes(p.action_type)) {\n  throw new Error(`Invalid action_type '${p.action_type}'. Must be RFQ | CONTINGENCY_PLAN | MONITOR_ONLY.`);\n}\nreturn [{ json: {\n  status: 'RECEIVED',\n  event_id: eventId,\n  action_type: p.action_type || 'UNKNOWN',\n  severity: p.severity || 'UNKNOWN',\n  routed_for_approval_to: p.approval_authority || 'Head of Supply Chain Management',\n  rfqs_generated: rfqDocs.length,\n  total_rfq_value_inr: fmt(total),\n  total_rfq_value_raw: total,\n  rfq_documents: rfqDocs,\n  contingency_plan: Array.isArray(p.contingency_actions) ? p.contingency_actions : [],\n  citations_logged: Array.isArray(p.policy_citations) ? p.policy_citations.length : 0,\n  processed_at: new Date().toISOString()\n}}];\n"
+        "jsCode": "// Validate first, mutate nothing, compute totals and the approver server-side. Never throws: failures become {ok:false}.\nconst raw = $input.first().json || {};\nconst p = raw.body ?? raw;\nconst errors = [];\nconst APPROVERS = ['Operations Manager - Procurement', 'Head of Supply Chain Management', 'Chief Financial Officer'];\nconst clean = v => String(v ?? '').replace(/[\\r\\n\\t]+/g, ' ').trim();\nconst num = (v, name, min, int) => {\n  const n = (typeof v === 'string' && v.trim() === '') || v === null || v === undefined ? NaN : Number(v);\n  if (!Number.isFinite(n) || n < min || (int && !Number.isInteger(n))) { errors.push(`${name} must be a number >= ${min}${int ? ' (integer)' : ''}, got ${JSON.stringify(v)}`); return 0; }\n  return n;\n};\nlet payloadJson = 'null';\ntry { payloadJson = JSON.stringify(p) ?? 'null'; } catch (e) { payloadJson = 'null'; }\nconst candidateId = (p && typeof p === 'object' && typeof p.event_id === 'string') ? p.event_id.slice(0, 60) : null;\ntry {\n  if (!p || typeof p !== 'object' || Array.isArray(p)) throw new Error('body must be a JSON object');\n  if (!['RFQ', 'CONTINGENCY_PLAN', 'MONITOR_ONLY'].includes(p.action_type)) errors.push(`action_type '${p.action_type}' invalid`);\n  if (!/^L[123]$/.test(p.severity || '')) errors.push('severity must be L1|L2|L3');\n  if (!/^SCD-\\d{8}-[0-9A-F]{6}$/.test(p.event_id || '')) errors.push('event_id missing or malformed');\n  const rfqs = Array.isArray(p.rfqs) ? p.rfqs : (p.rfqs === undefined ? [] : (errors.push('rfqs must be an array'), []));\n  if (p.action_type === 'RFQ' && rfqs.length === 0) errors.push('RFQ action needs at least one rfqs line');\n  if (p.action_type === 'MONITOR_ONLY' && rfqs.length) errors.push('MONITOR_ONLY must have no rfqs');\n  const docs = rfqs.map((r, i) => {\n    r = r || {};\n    const qty = num(r.quantity, `rfqs[${i}].quantity`, 1, true);\n    const price = num(r.unit_price_inr, `rfqs[${i}].unit_price_inr`, 0.01, false);\n    const days = num(r.required_within_days, `rfqs[${i}].required_within_days`, 1, true);\n    if (!/^S\\d{3}$/.test(r.supplier_id || '')) errors.push(`rfqs[${i}].supplier_id invalid`);\n    if (!/^P-\\d{4}$/.test(r.part_id || '')) errors.push(`rfqs[${i}].part_id invalid`);\n    const to = clean(r.supplier_email);\n    if (!/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(to)) errors.push(`rfqs[${i}].supplier_email invalid or missing`);\n    const value = qty * price;\n    if (r.est_value_inr !== undefined && Math.abs(Number(r.est_value_inr) - value) > value * 0.01) errors.push(`rfqs[${i}].est_value_inr != quantity x unit_price`);\n    return { rfq_number: `${p.event_id}-RFQ${String(i + 1).padStart(2, '0')}`, to,\n             subject: clean(`Urgent RFQ ${r.part_id} x ${qty.toLocaleString('en-IN')} - ${clean(p.company)}`),\n             body: `Dear ${clean(r.supplier_name)},\\n\\nPlease quote for ${qty} units of ${clean(r.part_id)} for delivery within ${days} days (CIF Nhava Sheva / DAP Manesar). Quote validity 15 days; state lead time, MOQ and capacity commitment.\\n\\nReason: ${clean(r.justification)}\\n\\nProcurement, ${clean(p.company)}`,\n             est_value_inr: value };\n  });\n  const total = docs.reduce((s, d) => s + d.est_value_inr, 0);\n  const approver = total <= 2500000 ? 'Operations Manager - Procurement' : total <= 10000000 ? 'Head of Supply Chain Management' : 'Chief Financial Officer';\n  if (docs.length && p.approval_authority !== approver) errors.push(`approval_authority must be '${approver}' for total ${total}`);\n  if (!docs.length && !APPROVERS.includes(p.approval_authority)) errors.push('approval_authority must be one of the three approvers');\n  if (errors.length) return [{ json: { ok: false, status: 'REJECTED', event_id: candidateId, errors, payload_json: payloadJson } }];\n  return [{ json: { ok: true, status: 'RECEIVED', event_id: p.event_id, action_type: p.action_type, severity: p.severity,\n    routed_for_approval_to: docs.length ? approver : p.approval_authority, rfqs_generated: docs.length,\n    total_rfq_value_inr: total.toLocaleString('en-IN'), total_rfq_value_raw: total, rfq_documents: docs,\n    contingency_plan: Array.isArray(p.contingency_actions) ? p.contingency_actions.map(clean) : [],\n    citations_logged: Array.isArray(p.policy_citations) ? p.policy_citations.length : 0,\n    processed_at: new Date().toISOString(), payload_json: payloadJson } }];\n} catch (e) {\n  return [{ json: { ok: false, status: 'REJECTED', event_id: candidateId, errors: [...errors, `validator crashed: ${e.message}`], payload_json: payloadJson } }];\n}\n"
       },
       "id": "a1b2c3d4-0002-4000-8000-000000000002",
-      "name": "Generate RFQs & Plan",
+      "name": "Validate & Build",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
@@ -33,16 +40,242 @@
     },
     {
       "parameters": {
-        "respondWith": "firstIncomingItem",
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c0a1b2c3-0004-4000-8000-000000000001",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
         "options": {}
       },
-      "id": "a1b2c3d4-0003-4000-8000-000000000003",
-      "name": "Respond to Webhook",
-      "type": "n8n-nodes-base.respondToWebhook",
-      "typeVersion": 1,
+      "id": "a1b2c3d4-0004-4000-8000-000000000004",
+      "name": "Payload valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
       "position": [
         480,
         0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH ins AS (\n  INSERT INTO action_log (event_id, action_type, severity, total_value_inr, approver, payload, status, attempts)\n  VALUES ($1, $2, $3, $4::numeric, $5, $6::jsonb, 'DELIVERED', 1)\n  ON CONFLICT (event_id) DO NOTHING\n  RETURNING event_id, 'NEW'::text AS how),\nupd AS (\n  UPDATE action_log SET status = 'DELIVERED', attempts = attempts + 1\n  WHERE event_id = $1 AND status IN ('PENDING', 'QUEUED') AND NOT EXISTS (SELECT 1 FROM ins)\n  RETURNING event_id, 'CLAIMED'::text AS how)\nSELECT event_id, how FROM ins UNION ALL SELECT event_id, how FROM upd;",
+        "options": {
+          "queryReplacement": "={{ [ $json.event_id, $json.action_type, $json.severity, $json.total_rfq_value_raw, $json.routed_for_approval_to, $json.payload_json ] }}"
+        }
+      },
+      "id": "a1b2c3d4-0005-4000-8000-000000000005",
+      "name": "Claim event",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        720,
+        -120
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "scmpostgres00001",
+          "name": "SCM audit DB"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c0a1b2c3-0006-4000-8000-000000000001",
+              "leftValue": "={{ !!$json.how }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0006-4000-8000-000000000006",
+      "name": "Claimed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        960,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Runs only after the database claim succeeded: returns the validated result without the bulky raw payload.\nconst v = $('Validate & Build').first().json;\nconst claim = $input.first().json || {};\nconst out = { ...v, claim: claim.how || 'NEW' };\ndelete out.payload_json;\nreturn [{ json: out }];\n"
+      },
+      "id": "a1b2c3d4-0007-4000-8000-000000000007",
+      "name": "Build documents",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        -220
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COALESCE(a.status, 'NOT_REQUIRED') AS approval_status, v.current_level AS approval_level,\n       v.deadline_at AS approval_deadline,\n       CASE WHEN a.event_id IS NULL THEN NULL ELSE approval_store_documents($1, $2::jsonb) END AS documents_stored\nFROM (SELECT $1::text AS event_id) e\nLEFT JOIN approvals a ON a.event_id = e.event_id\nLEFT JOIN v_approval_status v ON v.event_id = e.event_id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.event_id, JSON.stringify($json.rfq_documents) ] }}"
+        }
+      },
+      "id": "a1b2c3d4-0014-4000-8000-000000000014",
+      "name": "Hold documents",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1440,
+        -220
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "scmpostgres00001",
+          "name": "SCM audit DB"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Final answer of the intake workflow. RFQ documents are generated now but HELD in the database until the approver decides\n// (SOP-SC-015): they are never part of this response, and the caller is told exactly where the approval stands.\nconst built = $('Build documents').first().json;\nconst a = $input.first().json || {};\nconst status = a.approval_status || 'NOT_REQUIRED';\nconst out = { ...built };\nout.rfq_documents_held = Array.isArray(built.rfq_documents) ? built.rfq_documents.length : 0;\ndelete out.rfq_documents;\nout.approval_status = status;\nout.approval_level = a.approval_level || null;\nout.approval_deadline = a.approval_deadline || null;\nout.rfqs_released = status === 'NOT_REQUIRED' && out.rfq_documents_held === 0 ? true : false;\nout.next_step = status === 'NOT_REQUIRED' ? 'no approval needed'\n  : `awaiting ${a.approval_level || 'approver'} until ${a.approval_deadline || 'the deadline'}; decide via /webhook/supply-chain-approval`;\nreturn [{ json: out }];\n"
+      },
+      "id": "a1b2c3d4-0015-4000-8000-000000000015",
+      "name": "Compose response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        -220
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0008-4000-8000-000000000008",
+      "name": "Respond 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1920,
+        -220
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The database already holds a DELIVERED/DEAD/REJECTED row for this event_id: nothing is re-sent.\nconst v = $('Validate & Build').first().json;\nreturn [{ json: { ok: true, status: 'DUPLICATE', event_id: v.event_id, rfqs_generated: 0, note: 'event_id already processed; nothing re-sent' } }];\n"
+      },
+      "id": "a1b2c3d4-0009-4000-8000-000000000009",
+      "name": "Duplicate response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0010-4000-8000-000000000010",
+      "name": "Respond 200 duplicate",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1440,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO dead_letter (source, event_id, errors, payload)\nVALUES ('n8n-validate', $1, $2::jsonb, $3::jsonb) RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.event_id, JSON.stringify($json.errors), $json.payload_json ] }}"
+        }
+      },
+      "id": "a1b2c3d4-0011-4000-8000-000000000011",
+      "name": "Dead-letter (invalid)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        720,
+        140
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "scmpostgres00001",
+          "name": "SCM audit DB"
+        }
+      },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Body of the HTTP 422 answer: the validation errors plus the dead_letter row that now holds the payload.\nconst v = $('Validate & Build').first().json;\nconst dl = $input.first().json || {};\nreturn [{ json: { ok: false, status: 'REJECTED', event_id: v.event_id, errors: v.errors, dead_letter_id: dl.id ?? null } }];\n"
+      },
+      "id": "a1b2c3d4-0012-4000-8000-000000000012",
+      "name": "Rejected response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": 422
+        }
+      },
+      "id": "a1b2c3d4-0013-4000-8000-000000000013",
+      "name": "Respond 422",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1200,
+        140
       ]
     }
   ],
@@ -51,18 +284,131 @@
       "main": [
         [
           {
-            "node": "Generate RFQs & Plan",
+            "node": "Validate & Build",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Generate RFQs & Plan": {
+    "Validate & Build": {
       "main": [
         [
           {
-            "node": "Respond to Webhook",
+            "node": "Payload valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Payload valid?": {
+      "main": [
+        [
+          {
+            "node": "Claim event",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Dead-letter (invalid)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim event": {
+      "main": [
+        [
+          {
+            "node": "Claimed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claimed?": {
+      "main": [
+        [
+          {
+            "node": "Build documents",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Duplicate response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build documents": {
+      "main": [
+        [
+          {
+            "node": "Hold documents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hold documents": {
+      "main": [
+        [
+          {
+            "node": "Compose response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compose response": {
+      "main": [
+        [
+          {
+            "node": "Respond 200",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Duplicate response": {
+      "main": [
+        [
+          {
+            "node": "Respond 200 duplicate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dead-letter (invalid)": {
+      "main": [
+        [
+          {
+            "node": "Rejected response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rejected response": {
+      "main": [
+        [
+          {
+            "node": "Respond 422",
             "type": "main",
             "index": 0
           }
@@ -72,7 +418,11 @@
   },
   "active": true,
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "executionTimeout": 60,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "errorWorkflow": "scmerrorhandler001"
   },
   "id": "scmrfqworkflow0001"
 }

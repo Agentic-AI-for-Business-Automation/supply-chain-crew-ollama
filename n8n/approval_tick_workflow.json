@@ -1,0 +1,384 @@
+{
+  "name": "SCM Approval Escalation Tick",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "a1b2c3d4-0041-4000-8000-000000000041",
+      "name": "Every 5 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "supply-chain-tick",
+        "authentication": "headerAuth",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0042-4000-8000-000000000042",
+      "name": "Manual tick (token protected)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        120
+      ],
+      "webhookId": "supply-chain-tick-webhook",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "scmwebhooktoken01",
+          "name": "SCM webhook token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM approval_tick();",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0043-4000-8000-000000000043",
+      "name": "Run approval tick",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        260,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "scmpostgres00001",
+          "name": "SCM audit DB"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// What the escalation clock did on this run (reminders, escalations, holds). The database already wrote the notifications.\nconst rows = $input.all().map(i => i.json).filter(r => r && r.t_event_id);\nconst count = k => rows.filter(r => r.t_action === k).length;\nreturn [{ json: { ran_at: new Date().toISOString(), actions: rows.length, reminders: count('REMINDER'),\n  escalations: count('ESCALATED'), held: count('HELD'),\n  detail: rows.map(r => ({ event_id: r.t_event_id, action: r.t_action, from: r.t_from_level, to: r.t_to_level, deadline: r.t_deadline })) } }];\n"
+      },
+      "id": "a1b2c3d4-0044-4000-8000-000000000044",
+      "name": "Summarize tick",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        520,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, kind, event_id, recipient, subject, body, attempts, email FROM notify_claim_routed(50);",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0045-4000-8000-000000000045",
+      "name": "Claim notifications",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        780,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "scmpostgres00001",
+          "name": "SCM audit DB"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format claimed notifications by kind. Each message carries the routed email address (null when no route is configured).\nconst rows = $input.all().map(i => i.json).filter(r => r && r.id);\nconst tag = { APPROVAL_REQUEST: 'APPROVAL NEEDED', REMINDER: 'REMINDER', ESCALATED: 'ESCALATED', HELD: 'HELD - HUMAN DECISION NEEDED', PRODUCTION: 'PRODUCTION PLANNING', DECIDED: 'DECIDED' };\nconst clean = v => String(v ?? '').replace(/[\\r\\n\\t]+/g, ' ').trim();\nconst messages = rows.map(r => {\n  const label = tag[r.kind] || clean(r.kind);\n  const email = /^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(clean(r.email)) ? clean(r.email) : null;\n  return { id: Number(r.id), kind: r.kind, to: clean(r.recipient), email, event_id: r.event_id, attempts: Number(r.attempts || 0),\n    subject: `[SCM] ${label}: ${clean(r.subject)}`.slice(0, 200),\n    plain: `${clean(r.body)}\\n\\nEvent: ${clean(r.event_id)}\\nRecipient role: ${clean(r.recipient)}\\nSent by the Supply Chain Disruption crew (SOP-SC-015).`,\n    text: `[${label}] ${clean(r.subject)} - ${clean(r.body)}` };\n});\nreturn [{ json: { count: messages.length, ids: messages.map(m => m.id), messages } }];\n"
+      },
+      "id": "a1b2c3d4-0046-4000-8000-000000000046",
+      "name": "Format notifications",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One item per message that has an email route; a single {skip:true} item when there is nothing to send.\nconst msgs = ($input.first().json.messages || []).filter(m => m.email);\nif (!msgs.length) return [{ json: { skip: true } }];\nreturn msgs.map(m => ({ json: { skip: false, id: m.id, email: m.email, subject: m.subject, plain: m.plain } }));\n"
+      },
+      "id": "a1b2c3d4-0049-4000-8000-000000000049",
+      "name": "Split messages",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1300,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c0a1b2c3-0050-4000-8000-000000000001",
+              "leftValue": "={{ !$json.skip }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0050-4000-8000-000000000050",
+      "name": "Anything to email?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $json.email }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.plain }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "a1b2c3d4-0051-4000-8000-000000000051",
+      "name": "Send email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1780,
+        -100
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "scmgmail000000001",
+          "name": "SCM Gmail"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Decide which claimed notifications are finished. Sent ok -> finished. No email route -> finished (logged only).\n// Send failed -> left CLAIMED so notify_claim re-offers it after 10 minutes, but given up after 5 attempts (never an endless loop).\nconst MAX_ATTEMPTS = 5;\nconst msgs = $('Format notifications').first().json.messages || [];\nlet sent = [];\ntry { sent = $('Send email').all(); } catch (e) { sent = []; }   // the node did not run: there was nothing to send\nconst sendable = msgs.filter(m => m.email);\nconst ok = new Set();\nsendable.forEach((m, i) => { const out = (sent[i] || {}).json || {}; if (out.id && !out.error) ok.add(m.id); });\nconst done = [], failed = [], noRoute = [];\nfor (const m of msgs) {\n  if (!m.email) { noRoute.push(m.id); done.push(m.id); }\n  else if (ok.has(m.id)) done.push(m.id);\n  else if (m.attempts >= MAX_ATTEMPTS) { failed.push({ id: m.id, gave_up: true }); done.push(m.id); }\n  else failed.push({ id: m.id, gave_up: false });\n}\nreturn [{ json: { ids: done, emailed: ok.size, logged_only: noRoute.length, failed } }];\n"
+      },
+      "id": "a1b2c3d4-0052-4000-8000-000000000052",
+      "name": "Collect results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2020,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT notify_done(ARRAY(SELECT jsonb_array_elements_text($1::jsonb)::bigint)) AS marked;",
+        "options": {
+          "queryReplacement": "={{ [ JSON.stringify($json.ids) ] }}"
+        }
+      },
+      "id": "a1b2c3d4-0047-4000-8000-000000000047",
+      "name": "Mark notifications logged",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2260,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "scmpostgres00001",
+          "name": "SCM audit DB"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Final answer of the tick workflow (also the HTTP body when it is started through its webhook).\nconst tick = $('Summarize tick').first().json;\nconst sent = $('Format notifications').first().json;\nconst res = $('Collect results').first().json;\nconst marked = $input.first().json || {};\nreturn [{ json: { ...tick, notifications_dispatched: sent.count, notifications_marked_logged: marked.marked ?? 0,\n  emailed: res.emailed, logged_only: res.logged_only, email_failures: res.failed,\n  messages: sent.messages.map(m => ({ id: m.id, to: m.to, routed_to_email: !!m.email, text: m.text })),\n  delivery: 'email through the SCM Gmail credential where a route exists (notification_routes); always logged in notification_outbox and the n8n execution' } }];\n"
+      },
+      "id": "a1b2c3d4-0048-4000-8000-000000000048",
+      "name": "Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2500,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Every 5 minutes": {
+      "main": [
+        [
+          {
+            "node": "Run approval tick",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual tick (token protected)": {
+      "main": [
+        [
+          {
+            "node": "Run approval tick",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run approval tick": {
+      "main": [
+        [
+          {
+            "node": "Summarize tick",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarize tick": {
+      "main": [
+        [
+          {
+            "node": "Claim notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim notifications": {
+      "main": [
+        [
+          {
+            "node": "Format notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format notifications": {
+      "main": [
+        [
+          {
+            "node": "Split messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split messages": {
+      "main": [
+        [
+          {
+            "node": "Anything to email?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anything to email?": {
+      "main": [
+        [
+          {
+            "node": "Send email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Collect results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send email": {
+      "main": [
+        [
+          {
+            "node": "Collect results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect results": {
+      "main": [
+        [
+          {
+            "node": "Mark notifications logged",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark notifications logged": {
+      "main": [
+        [
+          {
+            "node": "Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 60,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "errorWorkflow": "scmerrorhandler001"
+  },
+  "id": "scmapprovaltick0001"
+}

@@ -1,6 +1,6 @@
 """Action record sent to n8n. Field names are a contract with the n8n workflow (Person 1)."""
 from typing import Literal
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, model_validator
 
 
 class AffectedPart(BaseModel):
@@ -38,11 +38,13 @@ class Citation(BaseModel):
 
 
 class ActionPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     action_type: Literal["RFQ", "CONTINGENCY_PLAN", "MONITOR_ONLY"]
     severity: Literal["L1", "L2", "L3"]
     disruption_summary: str = Field(min_length=10)
     disruption_location: str = Field(min_length=3)
-    sources: list[str] = []
+    sources: list[AnyHttpUrl] = []
     affected_parts: list[AffectedPart]
     rfqs: list[RFQLine] = []
     contingency_actions: list[str] = []

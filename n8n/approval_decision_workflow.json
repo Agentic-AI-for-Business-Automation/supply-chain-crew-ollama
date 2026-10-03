@@ -1,0 +1,280 @@
+{
+  "name": "SCM Approval Decision",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "supply-chain-approval",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0031-4000-8000-000000000031",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "supply-chain-approval-webhook",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "scmwebhooktoken01",
+          "name": "SCM webhook token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate an approval decision. Never throws: problems become {ok:false} and are routed to a 422 plus a dead_letter row.\nconst raw = $input.first().json || {};\nconst p = raw.body ?? raw;\nconst errors = [];\nconst APPROVERS = ['Operations Manager - Procurement', 'Head of Supply Chain Management', 'Chief Financial Officer'];\nlet payloadJson = 'null';\ntry { payloadJson = JSON.stringify(p) ?? 'null'; } catch (e) { payloadJson = 'null'; }\nconst candidateId = (p && typeof p === 'object' && typeof p.event_id === 'string') ? p.event_id.slice(0, 60) : null;\ntry {\n  if (!p || typeof p !== 'object' || Array.isArray(p)) throw new Error('body must be a JSON object');\n  if (!/^SCD-\\d{8}-[0-9A-F]{6}$/.test(p.event_id || '')) errors.push('event_id missing or malformed');\n  if (!APPROVERS.includes(p.approver_level)) errors.push(`approver_level must be one of: ${APPROVERS.join(' | ')}`);\n  if (!['APPROVE', 'REJECT'].includes(p.decision)) errors.push('decision must be APPROVE or REJECT');\n  const note = p.note === undefined || p.note === null ? '' : String(p.note).replace(/[\\r\\n\\t]+/g, ' ').trim();\n  if (note.length > 500) errors.push('note is longer than 500 characters');\n  if (errors.length) return [{ json: { ok: false, status: 'REJECTED', event_id: candidateId, errors, payload_json: payloadJson } }];\n  return [{ json: { ok: true, event_id: p.event_id, approver_level: p.approver_level, decision: p.decision, note, payload_json: payloadJson } }];\n} catch (e) {\n  return [{ json: { ok: false, status: 'REJECTED', event_id: candidateId, errors: [...errors, `validator crashed: ${e.message}`], payload_json: payloadJson } }];\n}\n"
+      },
+      "id": "a1b2c3d4-0032-4000-8000-000000000032",
+      "name": "Validate decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c0a1b2c3-0033-4000-8000-000000000001",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0033-4000-8000-000000000033",
+      "name": "Decision valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH d AS (SELECT approval_decide($1, $2, $3, $4) AS outcome)\nSELECT d.outcome, CASE WHEN d.outcome = 'APPROVED' THEN approval_release($1) END AS release FROM d;",
+        "options": {
+          "queryReplacement": "={{ [ $json.event_id, $json.approver_level, $json.decision, $json.note ] }}"
+        }
+      },
+      "id": "a1b2c3d4-0034-4000-8000-000000000034",
+      "name": "Decide",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        720,
+        -100
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "scmpostgres00001",
+          "name": "SCM audit DB"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turn the database outcome into an HTTP status and body. Authority and state rules live in approval_decide(); this only maps.\nconst v = $('Validate decision').first().json;\nconst row = $input.first().json || {};\nconst outcome = row.outcome || 'ERROR';\nconst http = { APPROVED: 200, REJECTED: 200, DENIED: 403, UNKNOWN_EVENT: 404, ALREADY_DECIDED: 409, UNKNOWN_ACTOR: 422, BAD_DECISION: 422 }[outcome] ?? 500;\nconst body = { ok: http === 200, outcome, event_id: v.event_id, approver_level: v.approver_level };\nif (outcome === 'APPROVED') {\n  const rel = typeof row.release === 'string' ? JSON.parse(row.release) : (row.release || {});\n  body.released = !!rel.released;\n  body.approved_by = rel.approved_by || v.approver_level;\n  body.rfq_documents = rel.documents || [];\n  if (!rel.released) body.release_note = rel.reason || 'nothing to release';\n} else if (outcome === 'DENIED') {\n  body.message = 'this level is below the approval authority required by SOP-SC-014 section 5';\n} else if (outcome === 'ALREADY_DECIDED') {\n  body.message = 'a decision was already recorded; decisions are final';\n}\nreturn [{ json: { http, body } }];\n"
+      },
+      "id": "a1b2c3d4-0035-4000-8000-000000000035",
+      "name": "Shape response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.body }}",
+        "options": {
+          "responseCode": "={{ $json.http }}"
+        }
+      },
+      "id": "a1b2c3d4-0036-4000-8000-000000000036",
+      "name": "Respond with outcome",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1200,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO dead_letter (source, event_id, errors, payload)\nVALUES ('n8n-validate', $1, $2::jsonb, $3::jsonb) RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.event_id, JSON.stringify($json.errors), $json.payload_json ] }}"
+        }
+      },
+      "id": "a1b2c3d4-0037-4000-8000-000000000037",
+      "name": "Dead-letter (invalid decision)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        720,
+        120
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "scmpostgres00001",
+          "name": "SCM audit DB"
+        }
+      },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Body of the 422 answer for a malformed decision request.\nconst v = $('Validate decision').first().json;\nconst dl = $input.first().json || {};\nreturn [{ json: { http: 422, body: { ok: false, status: 'REJECTED', event_id: v.event_id, errors: v.errors, dead_letter_id: dl.id ?? null } } }];\n"
+      },
+      "id": "a1b2c3d4-0038-4000-8000-000000000038",
+      "name": "Rejected decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.body }}",
+        "options": {
+          "responseCode": "={{ $json.http }}"
+        }
+      },
+      "id": "a1b2c3d4-0039-4000-8000-000000000039",
+      "name": "Respond 422",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1200,
+        120
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate decision": {
+      "main": [
+        [
+          {
+            "node": "Decision valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decision valid?": {
+      "main": [
+        [
+          {
+            "node": "Decide",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Dead-letter (invalid decision)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decide": {
+      "main": [
+        [
+          {
+            "node": "Shape response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shape response": {
+      "main": [
+        [
+          {
+            "node": "Respond with outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dead-letter (invalid decision)": {
+      "main": [
+        [
+          {
+            "node": "Rejected decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rejected decision": {
+      "main": [
+        [
+          {
+            "node": "Respond 422",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 60,
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "errorWorkflow": "scmerrorhandler001"
+  },
+  "id": "scmapprovaldecide01"
+}

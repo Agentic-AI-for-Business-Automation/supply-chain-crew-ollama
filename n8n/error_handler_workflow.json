@@ -1,0 +1,228 @@
+{
+  "name": "SCM Error Handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "e1000000-0001-4000-8000-000000000001",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Error sub-workflow: turn an n8n failure into a dead_letter row payload.\nconst e = $input.first().json || {};\nconst msg = e.execution?.error?.message || 'unknown n8n error';\nconst node = e.execution?.lastNodeExecuted || 'unknown node';\nreturn [{ json: { errors: JSON.stringify([`${e.workflow?.name || 'workflow'} / ${node}: ${msg}`.slice(0, 480)]), execution_url: e.execution?.url || null } }];\n"
+      },
+      "id": "a1b2c3d4-0021-4000-8000-000000000021",
+      "name": "Format error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO dead_letter (source, errors, payload)\nVALUES ('n8n-error', $1::jsonb, jsonb_build_object('execution_url', $2::text)) RETURNING id;",
+        "options": {
+          "queryReplacement": "={{ [ $json.errors, $json.execution_url ] }}"
+        }
+      },
+      "id": "a1b2c3d4-0022-4000-8000-000000000022",
+      "name": "Record in dead_letter",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        480,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "scmpostgres00001",
+          "name": "SCM audit DB"
+        }
+      },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT email FROM notification_routes WHERE recipient = 'SCM Alerts';",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0023-4000-8000-000000000023",
+      "name": "Look up alert route",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        720,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "scmpostgres00001",
+          "name": "SCM audit DB"
+        }
+      },
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Error workflow: build the alert email. {skip:true} when no 'SCM Alerts' route is configured.\nconst err = $('Format error').first().json;\nconst route = $input.first().json || {};\nconst email = /^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(String(route.email || '')) ? route.email : null;\nif (!email) return [{ json: { skip: true } }];\nconst msg = JSON.parse(err.errors)[0];\nreturn [{ json: { skip: false, email, subject: '[SCM] n8n workflow failed', plain: `${msg}\\n\\nThe failure was recorded in dead_letter.\\nExecution: ${err.execution_url || 'n/a'}` } }];\n"
+      },
+      "id": "a1b2c3d4-0024-4000-8000-000000000024",
+      "name": "Build alert mail",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c0a1b2c3-0025-4000-8000-000000000001",
+              "leftValue": "={{ !$json.skip }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a1b2c3d4-0025-4000-8000-000000000025",
+      "name": "Alert route configured?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "={{ $json.email }}",
+        "subject": "={{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.plain }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "a1b2c3d4-0026-4000-8000-000000000026",
+      "name": "Send alert email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        1440,
+        -60
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "scmgmail000000001",
+          "name": "SCM Gmail"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format error": {
+      "main": [
+        [
+          {
+            "node": "Record in dead_letter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record in dead_letter": {
+      "main": [
+        [
+          {
+            "node": "Look up alert route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Look up alert route": {
+      "main": [
+        [
+          {
+            "node": "Build alert mail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build alert mail": {
+      "main": [
+        [
+          {
+            "node": "Alert route configured?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert route configured?": {
+      "main": [
+        [
+          {
+            "node": "Send alert email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all"
+  },
+  "id": "scmerrorhandler001"
+}

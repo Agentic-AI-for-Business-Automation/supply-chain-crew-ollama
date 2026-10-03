@@ -13,3 +13,9 @@ Severity L2; RFQs 22,000/15,000/12,000/26,000 to S201/S201/S202/S301; total ₹5
 1. **Human-in-the-loop for CFO RFQs:** §5 routes >₹1cr to the CFO. Chosen: keep the crew autopilot for the demo but `approval_authority` is carried in the payload, so an n8n IF node can pause >₹1cr records for approval without changing the agent contract. Tradeoff: auto-send is faster to demo; pausing is safer for real spend.
 2. **Outbox operations:** payloads queue as `outbox/<event_id>.json`; `replay_outbox()` re-POSTs and deletes on success (at-least-once; n8n side does not dedupe event_id, so replays may duplicate RFQs — acceptable for a mock workflow, note for production).
 3. **Memory cost vs quality:** `memory=True` costs OpenAI embedding calls per run; for single-shot demos `--no-memory` is acceptable; for `--watch` mode memory helps cross-run dedup.
+
+
+## Round 3 changes (2026-10-03)
+- `trigger_n8n` records intent in `action_log` (PENDING) before sending, sends the `X-SCM-Token` header, and drives the lifecycle: 200 -> DELIVERED, payload-fault 4xx -> REJECTED, timeouts/5xx/401/403/429 -> QUEUED plus a retryable `dead_letter` row, database also down -> spill file.
+- `tools/dlq.py` replays due rows with `SKIP LOCKED` claims, exponential backoff (2^n minutes, max 6 h) and `DEAD` after 6 attempts or a permanent 4xx. `main.py --replay-dlq` runs it; `--watch` runs it every cycle.
+- Scout and Analyst tasks carry CrewAI guardrails (`schemas/guardrails.py`); citations are checked down to the clause.

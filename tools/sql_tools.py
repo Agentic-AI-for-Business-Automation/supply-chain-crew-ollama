@@ -12,8 +12,12 @@ _db = None
 # Block writes even when hidden in stacked queries or string tricks. String literals are
 # stripped before the check so a part named e.g. 'Updated Bracket' does not false-positive,
 # while 'SELECT 1; DROP TABLE' still gets rejected via the DROP keyword.
-_BLOCKED = re.compile(r"(?i)\b(insert|update|delete|drop|alter|truncate|grant|create|copy|call)\b")
+_BLOCKED = re.compile(r"(?i)\b(insert|update|delete|drop|alter|truncate|grant|create|copy|call|into|pg_\w+|lo_\w+|dblink\w*|nextval|setval)\b")
 _CLAUSE_SPLIT = re.compile(r"'(?:''|[^'])*'")  # single-quoted literals
+
+
+def _scrub(msg) -> str:
+    return re.sub(r"://[^/@\s]+@", "://***@", str(msg))
 
 
 def log(tag: str, msg: str) -> None:
@@ -21,15 +25,18 @@ def log(tag: str, msg: str) -> None:
 
 
 def get_db() -> SQLDatabase:
+    """LangChain wrapper over the shared pooled read-only engine (pre-ping survives a database restart)."""
     global _db
-    if _db is None:
-        _db = SQLDatabase.from_uri(_db_uri(), view_support=True, sample_rows_in_table_info=2)
+    from tools.db import get_engine
+    engine = get_engine("ro")
+    if _db is None or _db._engine is not engine:
+        _db = SQLDatabase(engine, view_support=True, sample_rows_in_table_info=2)
     return _db
 
 
 def get_watchlist() -> str:
     rows = get_db()._execute(
-        "SELECT DISTINCT s.supplier_name, s.country, s.export_port FROM suppliers s "
+        "SELECT DISTINCT s.supplier_name, s.country, COALESCE(s.export_port, 'Domestic (road)') AS export_port FROM suppliers s "
         "JOIN supplier_parts sp USING (supplier_id) WHERE sp.sourcing_role = 'PRIMARY' "
         "ORDER BY s.country, s.supplier_name")
     return "; ".join(f"{r['supplier_name']} ({r['country']}, port {r['export_port']})" for r in rows)
@@ -41,7 +48,7 @@ def list_erp_tables(dummy: str = "") -> str:
     try:
         return ", ".join(get_db().get_usable_table_names())
     except Exception as e:
-        return f"ERROR: cannot reach the ERP database ({e})."
+        return f"ERROR: cannot reach the ERP database ({_scrub(e)[:200]})."
 
 
 @tool("Describe ERP Tables")
@@ -51,7 +58,7 @@ def describe_erp_tables(table_names: str) -> str:
     try:
         return get_db().get_table_info([t.strip() for t in table_names.split(",") if t.strip()])
     except Exception as e:
-        return f"ERROR: {e}. Use 'List ERP Tables' to get valid names."
+        return f"ERROR: {_scrub(e)[:300]}. Use 'List ERP Tables' to get valid names."
 
 
 @tool("Query ERP Database")
@@ -82,8 +89,8 @@ def query_erp(sql: str) -> str:
         log("TOOL", f"SQL OK: {sql[:110]}")
         return (out[:6000] if out else "0 rows")
     except Exception as e:
-        log("RECOVERY", f"SQL error returned to agent: {str(e)[:120]}")
-        return (f"SQL ERROR: {str(e)[:500]}\n"
+        log("RECOVERY", f"SQL error returned to agent: {_scrub(e)[:120]}")
+        return (f"SQL ERROR: {_scrub(e)[:500]}\n"
                 "Fix the query (check names with 'Describe ERP Tables') and retry.")
 
 

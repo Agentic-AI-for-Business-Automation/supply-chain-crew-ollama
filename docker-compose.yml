@@ -1,14 +1,18 @@
 services:
   erp-db:
-    image: postgres:16
+    image: postgres:16.4
     container_name: erp-db
     environment:
       POSTGRES_USER: scm
       POSTGRES_PASSWORD: scm
       POSTGRES_DB: erp
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     volumes:
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./db/init.sql:/docker-entrypoint-initdb.d/10_V001_init.sql:ro
+      - ./db/migrations/V002__lifecycle_dlq_ports.sql:/docker-entrypoint-initdb.d/20_V002_lifecycle_dlq_ports.sql:ro
+      - ./db/migrations/V003__approval_escalation.sql:/docker-entrypoint-initdb.d/30_V003_approval_escalation.sql:ro
+      - ./db/migrations/V004__notification_routes.sql:/docker-entrypoint-initdb.d/40_V004_notification_routes.sql:ro
+      - ./db/migrations/V005__route_set_trims_first.sql:/docker-entrypoint-initdb.d/50_V005_route_set_trims_first.sql:ro
       - erp_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U scm -d erp"]
@@ -16,9 +20,9 @@ services:
       retries: 10
 
   n8n:
-    image: n8nio/n8n:latest
+    image: n8nio/n8n:2.41.6
     container_name: n8n
-    ports: ["5678:5678"]
+    ports: ["127.0.0.1:5678:5678"]
     environment:
       GENERIC_TIMEZONE: Asia/Kolkata
       N8N_SECURE_COOKIE: "false"

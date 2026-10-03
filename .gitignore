@@ -5,3 +5,6 @@ __pycache__/
 outbox/
 reports/
 .pytest_cache/
+
+# local machine settings (ports, container names): never committed
+docker-compose.override.yml

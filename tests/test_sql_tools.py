@@ -8,7 +8,10 @@ needs_db = pytest.mark.skipif(not _db_up(), reason="ERP database not running")
 
 @pytest.mark.parametrize("bad", ["DROP TABLE parts", "delete from parts", "UPDATE parts SET uom='x'",
                                  "SELECT 1; DROP TABLE parts", "CREATE TABLE x(a int)",
-                                 "SELECT * FROM parts; DELETE FROM parts", "COPY parts TO '/tmp/x'"])
+                                 "SELECT * FROM parts; DELETE FROM parts", "COPY parts TO '/tmp/x'",
+                                 "SELECT * INTO scratch FROM parts", "SELECT pg_sleep(600)",
+                                 "SELECT pg_read_file('/etc/passwd')", "SELECT nextval('x')",
+                                 "SELECT pg_terminate_backend(1)"])
 def test_guard_rejects_writes(bad):
     assert s.query_erp.run(sql=bad).startswith("REJECTED")
 

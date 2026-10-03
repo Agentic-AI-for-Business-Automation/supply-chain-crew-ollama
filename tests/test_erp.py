@@ -1,3 +1,4 @@
+from tests.dbconf import admin_dsn
 import os, math, psycopg2, pytest
 from dotenv import load_dotenv
 load_dotenv()
@@ -5,7 +6,10 @@ DSN = os.getenv("DATABASE_URL", "postgresql+psycopg2://scm:scm@localhost:5432/er
 
 @pytest.fixture(scope="module")
 def cur():
-    conn = psycopg2.connect(DSN)
+    try:
+        conn = psycopg2.connect(DSN, connect_timeout=3)
+    except psycopg2.OperationalError as e:
+        pytest.skip(f"ERP database not running: {e}")
     yield conn.cursor()
     conn.close()
 
@@ -66,3 +70,86 @@ def test_p4001_stays_single_source(cur):
     """Part B+ 1: P-4001 must have exactly one supplier (S302, PRIMARY) and no backup."""
     cur.execute("SELECT supplier_id, sourcing_role FROM supplier_parts WHERE part_id='P-4001'")
     assert cur.fetchall() == [("S302", "PRIMARY")]
+
+
+# ---- structural constraints (run inside a rolled-back transaction with an admin connection) ----
+ADMIN_DSN = admin_dsn()
+
+
+@pytest.fixture()
+def admin():
+    try:
+        conn = psycopg2.connect(ADMIN_DSN, connect_timeout=3)
+    except psycopg2.OperationalError as e:
+        pytest.skip(f"admin connection unavailable (set ERP_ADMIN_URL): {e}")
+    yield conn
+    conn.rollback()
+    conn.close()
+
+
+def _fails(conn, sql, params=None):
+    import psycopg2.errors as pe
+    cur = conn.cursor()
+    cur.execute("SAVEPOINT s")
+    try:
+        cur.execute(sql, params)
+    except (pe.IntegrityError, pe.CheckViolation) as e:
+        cur.execute("ROLLBACK TO SAVEPOINT s")
+        return type(e).__name__
+    cur.execute("ROLLBACK TO SAVEPOINT s")
+    return None
+
+
+def test_second_primary_for_a_part_is_rejected(admin):
+    assert _fails(admin, "INSERT INTO supplier_parts VALUES ('S201','P-4001','PRIMARY',40,1000,5000)") == "UniqueViolation"
+
+
+def test_po_with_null_supplier_or_part_is_rejected(admin):
+    base = ("INSERT INTO purchase_orders (po_id,supplier_id,part_id,quantity,unit_price_inr,po_value_inr,order_date,"
+            "expected_delivery,origin_port,dest_port,transport_mode,status) VALUES ('PO-26-9999',%s,%s,10,10,100,"
+            "CURRENT_DATE,CURRENT_DATE,'Kaohsiung','Nhava Sheva','SEA','CONFIRMED')")
+    assert _fails(admin, base, (None, "P-1001")) == "NotNullViolation"
+    assert _fails(admin, base, ("S101", None)) == "NotNullViolation"
+
+
+def test_po_for_supplier_part_pair_that_does_not_exist_is_rejected(admin):
+    sql = ("INSERT INTO purchase_orders (po_id,supplier_id,part_id,quantity,unit_price_inr,po_value_inr,order_date,"
+           "expected_delivery,origin_port,dest_port,transport_mode,status) VALUES ('PO-26-9998','S101','P-5001',10,10,100,"
+           "CURRENT_DATE,CURRENT_DATE,'Kaohsiung','Nhava Sheva','SEA','CONFIRMED')")
+    assert _fails(admin, sql) == "ForeignKeyViolation"
+
+
+def test_po_value_must_equal_qty_times_price(admin):
+    sql = ("INSERT INTO purchase_orders (po_id,supplier_id,part_id,quantity,unit_price_inr,po_value_inr,order_date,"
+           "expected_delivery,origin_port,dest_port,transport_mode,status) VALUES ('PO-26-9997','S101','P-1001',10,420,999,"
+           "CURRENT_DATE,CURRENT_DATE,'Kaohsiung','Nhava Sheva','SEA','CONFIRMED')")
+    assert _fails(admin, sql) == "CheckViolation"
+
+
+def test_shipping_route_is_generated_and_filterable(cur):
+    cur.execute("SELECT count(*) FROM purchase_orders WHERE shipping_route = origin_port || ' -> ' || dest_port || ' (' || lower(transport_mode) || ')'")
+    assert cur.fetchone()[0] == 7
+
+
+def test_view_keeps_part_without_primary_visible(admin):
+    cur = admin.cursor()
+    cur.execute("INSERT INTO parts VALUES ('P-9999','Orphan part','Test',FALSE,'EA')")
+    cur.execute("INSERT INTO inventory (part_id,warehouse,on_hand_qty,safety_stock_qty,daily_consumption) VALUES ('P-9999','Manesar-WH1',10,1,1)")
+    cur.execute("SELECT primary_supplier_id FROM v_part_risk WHERE part_id='P-9999'")
+    assert cur.fetchall() == [(None,)]
+
+
+def test_eligible_view_flags_conditional_supplier(cur):
+    cur.execute("SELECT supplier_id, rfq_allowed_without_signoff FROM v_eligible_backups WHERE supplier_id='S402'")
+    assert cur.fetchall() == [("S402", False)]
+
+
+def test_readonly_role_can_read_new_tables_but_not_write():
+    dsn = os.getenv("DATABASE_URL", "").replace("+psycopg2", "")
+    if "scm_ro" not in dsn:
+        pytest.skip("DATABASE_URL does not use scm_ro")
+    conn = psycopg2.connect(dsn); c = conn.cursor()
+    c.execute("SELECT count(*) FROM action_log"); c.execute("SELECT count(*) FROM v_eligible_backups")
+    with pytest.raises(psycopg2.Error):
+        c.execute("DELETE FROM parts")
+    conn.close()

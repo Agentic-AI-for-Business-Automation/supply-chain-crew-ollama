@@ -1,7 +1,7 @@
 # Knowledge Base — Page Map (`scm-knowledge-base`)
 
-Owner: Person 2 (Khushal). Source of truth for every policy citation the agents quote.
-Two PDFs, 2 pages each, generated reproducibly from `knowledge_base/source/build_pdfs.py`.
+Owner: the SCM lead (Person 6 maintains it day to day). Originally written by Person 2. Source of truth for every policy citation the agents quote.
+Three PDFs generated reproducibly from `knowledge_base/source/build_pdfs.py` (SOP-SC-014 and the contracts are 2 pages each, SOP-SC-015 is 1 page); the same run writes `clauses.jsonl`, the structured index source.
 
 - `knowledge_base/SOP-SC-014_Supply_Disruption_Response.pdf` — disruption rulebook (SOP-SC-014 v3.2)
 - `knowledge_base/Vendor_Contracts_and_AVL.pdf` — contracts digest + Approved Vendor List FY 2026-27
@@ -86,3 +86,28 @@ Synonym check run over PDF text: `secondary` 0 hits, `alternate supplier` 0 hits
 Show SOP page 1 clause 3.2 highlighted + `v_part_risk` row side by side. Script covers
 severity → trigger → quantity in ~45 s (worst-case 21 days → L2; cover < 21+5 so RFQ; shortfall × 1.2 → MOQ).
 Full narration in `docs/demo_script.md`.
+
+
+## Re-audit changes (2026-10-03)
+- SOP now carries `Effective: 2026-10-01 · Supersedes: none` and three clarifications that add no numeric rule:
+  **2.3** (an event is confirmed only by two independent sources; unconfirmed means L1), **3.6** (cover *equal to or above* delay + 5 is part watch status, closing the gap with 3.2, and no longer reuses the label "L1"),
+  **4.1** (freight premium comes from the buyer's carrier quote; never estimated). Page breaks are unchanged (2 pages each).
+- `build_docx.py` now renders from `build_pdfs.py`'s flows, so PDF and DOCX cannot drift (`tests/test_kb_consistency.py` checks it, plus Schedule A / lead times against the ERP).
+- RAG chunks are clause-atomic (no character overlap, every chunk starts at a clause or section label, each `Section`/`Schedule` heading starts a new chunk). Retrieval keeps only hits within 0.08 of the best, boosts exact clause ids, drops repeated whole-page chunks, and returns `RAG ERROR` for off-topic queries.
+- Clause **4.7** added (lead time longer than days of cover: combine the RFQ with 4.1 and state the stock-out gap). It closes the gap where P-1001/S201, P-2001/S202 and P-3002/S301 cannot arrive before stock-out. It adds no numeric threshold.
+
+- Clause **4.5** now also requires notifying Production Planning when the stock-out falls before the earliest backup can deliver (clause 4.7). This reconciles the SOP with the A5 demo expectation (P-3002 runs out in 8 days, backup lead time 14 days) without changing the 7-day number.
+
+
+## Round 4 changes (2026-10-03): approval timeouts and Clauses 4.5 / 4.7 as executable rules
+- **Clauses 4.5 and 4.7 are accepted as written.** They are executed from the ERP by `schemas/policy_check.derive`: 4.7 gives `stockout_gaps` (a backup whose standard lead time exceeds days of cover; air freight is combined with the RFQ, the gap in days is stated), 4.5 gives `production_notifications` (cover within 7 days, or the earliest backup cannot deliver before stock-out). The LLM never supplies these fields; the database turns them into Production Planning notifications.
+- **New document `SOP-SC-015_Approval_Timeouts_and_Escalation.pdf` (1 page).** Approval window 8 h (L2) / 4 h (L3), the same as the response windows in SOP-SC-014 section 2; a reminder at 50% of the window; escalation one level up (Operations Manager, then Head of SCM, then CFO) with a fresh window; HELD after the last level, with no automatic approval and no bypass at any amount. Its numbers are generated from `schemas/policy_constants.py`, so the PDF, the database seed and the n8n logic cannot disagree (`tools/kb_lint.py` and the tests enforce it).
+- **Nothing in the knowledge base needed purging.** No PDF or clause named a person as a gatekeeper; "Person 2" appeared only as an author label in these docs.
+
+## Change procedure (no gatekeeper)
+Any team member may change policy text; the checks below replace a reviewer:
+1. Edit the clause in `knowledge_base/source/build_pdfs.py` (numbers come from `schemas/policy_constants.py`; change a number there, never in the text).
+2. Rebuild: `cd knowledge_base/source && python build_pdfs.py && python build_docx.py` (PDFs, DOCX and `clauses.jsonl`).
+3. Run `python -m tools.kb_lint` (unique clause ids, resolvable references, ERP ids, numbers equal to the constants), then `python -m pytest -q` (page counts, DOCX equals PDF, retrieval and citation tests).
+4. If a policy number changed (approval windows, reminder share, ladder), run `python -m tools.migrate`: it syncs the stored approval policy from `schemas/policy_constants.py`. Never edit a migration that was already applied (its checksum is verified); open approvals keep their deadline, new ones use the new window. Until the sync and the PDF rebuild are done, `tests/test_approvals_db.py`, `kb_lint` and the startup gate fail.
+5. Re-index happens automatically (the index name hashes the PDFs and `clauses.jsonl`).

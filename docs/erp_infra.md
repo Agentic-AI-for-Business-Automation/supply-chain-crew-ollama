@@ -43,3 +43,18 @@ P-5001 (cover 25, China/Yantian) and P-4001 (cover 40, domestic) are out of scop
 **2. Shared capacity blind spot.** `monthly_capacity` is per (supplier, part). S301 backs P-1001, P-3001 and P-3002 with 12,000 / 30,000 / 15,000 per month, but those lines presumably share one plant. In the demo only P-3002 RFQs S301 (26,000 vs 15,000, an intentional breach), so P-1001 going to S201 hides the problem; if P-1001 also fell to S301 the combined demand would exceed any single-line figure and the per-part numbers would overstate availability. Proposal (not implemented): add `suppliers.total_monthly_capacity` (or a `supplier_capacity` table) and make the Analyst check the **sum** of RFQ quantities per supplier against it, keeping per-part capacity as a secondary limit.
 
 **3. n8n extension investigated: audit log (SOP §6.3, 7-year retention).** Not enabled for the demo. Best fit is the n8n Postgres node inserting each payload into an `rfq_audit_log(event_id, payload JSONB, processed_at)` table, using an n8n credential (host `erp-db`, user `scm`) stored in n8n's encrypted credential store, never in the exported JSON. It was left out because the exported workflow would then depend on a credential that every teammate must recreate after import, and it adds a failure point to the live demo. Real email (SMTP/Gmail) was rejected for the same reason plus the risk of sending mail to the `.example` supplier addresses.
+
+
+## Re-audit changes (2026-10-03)
+- One PRIMARY per part is enforced (partial unique index); `purchase_orders` supplier/part are NOT NULL with a composite FK to `supplier_parts`, a price snapshot, and `po_value = qty x price` CHECK.
+- Lane is structured (`origin_port`, `dest_port`, `transport_mode`); `shipping_route` is a generated column, so `LIKE 'Kaohsiung%'` still works. Road suppliers have `export_port` NULL (views show `Domestic (road)`).
+- `v_part_risk` keeps 4 decimals, exposes `data_age_days`, and LEFT JOINs the primary supplier. `v_eligible_backups` flags S402 (`rfq_allowed_without_signoff = false`).
+- New `action_log` table (audit, SOP 6.3) plus roles `scm_ro` (read-only, 5 s timeout) and `scm_audit` (insert into `action_log` only).
+- Images pinned: `postgres:16.4`, `n8nio/n8n:2.41.6`. Ports are bound to 127.0.0.1.
+- Limitation kept: inventory is a snapshot (no on-order quantity, no lead-time-vs-cover logic), and `monthly_capacity` is per (supplier, part).
+
+
+## Round 3 changes (2026-10-03)
+- `db/init.sql` is the frozen V001 baseline; all later changes are versioned migrations in `db/migrations/` applied by `python -m tools.migrate` (checksum-verified, advisory-locked). Fresh containers get V002 through the compose mount.
+- V002 adds `ports` (foreign keys from suppliers and purchase orders), the `action_log` state machine, the `dead_letter` queue (`dlq_claim`, `dlq_release`), and the views `v_part_pipeline` and `v_lane_exposure`.
+- n8n workflows are generated from `n8n/js/*.js` by `n8n/build_workflows.py`; `scripts/setup_n8n.py` installs them with credentials and header auth.

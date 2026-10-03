@@ -1,5 +1,5 @@
 """Web search tool for the Disruption Scout: Serper (LangChain) -> DuckDuckGo -> graceful message."""
-import os, time
+import os, re, time
 from datetime import datetime
 from crewai.tools import tool
 from dotenv import load_dotenv
@@ -7,6 +7,15 @@ from langchain_community.utilities import GoogleSerperAPIWrapper
 
 load_dotenv()
 _state = {"calls": 0, "simulate": False}
+_SEEN_URLS: set[str] = set()   # every URL a search returned: the Scout may cite only these
+
+
+def seen_urls() -> set[str]:
+    return set(_SEEN_URLS)
+
+
+def reset_seen_urls() -> None:
+    _SEEN_URLS.clear()
 
 
 def log(tag: str, msg: str) -> None:
@@ -24,6 +33,16 @@ def enable_simulated_failure(on: bool = True) -> None:
     _state["calls"] = 0  # reset so the NEXT search demonstrates the retry on camera
 
 
+_INJECTION = re.compile(r"(?i)(ignore (all |any )?(previous|prior|above)|system prompt|you are now|"
+                        r"(call|use|run) the [\w ]+ tool|send (an? )?rfq|disregard)")
+
+
+def _retryable(e: Exception) -> bool:
+    """Auth/quota/bad-request errors will not fix themselves; 429 and 5xx/timeouts might."""
+    code = getattr(getattr(e, "response", None), "status_code", None)
+    return code is None or code == 429 or code >= 500
+
+
 def _fmt(items: list) -> str:
     if not isinstance(items, list):
         return "NO RESULTS for this query."
@@ -34,10 +53,15 @@ def _fmt(items: list) -> str:
         title = str(raw.get("title") or "Untitled").strip()
         date = str(raw.get("date") or "").strip()
         source = str(raw.get("source") or "").strip()
-        snippet = str(raw.get("snippet") or raw.get("body") or "").strip()
+        snippet = _INJECTION.sub("[removed]", str(raw.get("snippet") or raw.get("body") or "").strip())[:400]
+        title = _INJECTION.sub("[removed]", title)[:200]
         url = str(raw.get("link") or raw.get("url") or "").strip()
+        if url:
+            _SEEN_URLS.add(url)
         lines.append(f"- {title} | {date} | {source}\n  {snippet}\n  {url}")
-    return "\n".join(lines) or "NO RESULTS for this query."
+    if not lines:
+        return "NO RESULTS for this query."
+    return "<untrusted_search_results>\n" + "\n".join(lines) + "\n</untrusted_search_results>"
 
 
 @tool("Web Search")
@@ -61,7 +85,10 @@ def web_search(query: str) -> str:
                 return _fmt(news)
             except Exception as e:
                 log("RECOVERY", f"Serper attempt {attempt}/3 failed: {e}")
-                time.sleep(2 ** attempt)
+                if not _retryable(e):
+                    break
+                if attempt < 3:
+                    time.sleep(2 ** attempt)
     else:
         log("RECOVERY", "No SERPER_API_KEY - skipping to DuckDuckGo fallback")
     try:
