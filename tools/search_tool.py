@@ -72,7 +72,7 @@ def web_search(query: str) -> str:
         try:
             with DDGS() as ddgs:
                 res = list(ddgs.news(q, max_results=8)) or []
-        except TypeError:
+        except (TypeError, AttributeError):
             # very old clients without context-manager support
             res = list(DDGS().news(q, max_results=8)) or []
         log("RECOVERY", f"Fell back to DuckDuckGo ({len(res)} hits): {q}")

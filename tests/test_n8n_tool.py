@@ -7,7 +7,7 @@ GOOD = {"action_type": "RFQ", "severity": "L2", "disruption_summary": "Typhoon c
                             "projected_delay_days": 21, "shortfall_units": 16800}],
         "rfqs": [{"supplier_id": "S201", "supplier_name": "Penang Semicon Sdn. Bhd.", "part_id": "P-1001",
                   "quantity": 22000, "unit_price_inr": 452, "est_value_inr": 9944000,
-                  "required_within_days": 21, "justification": "SOP 3.2"}],
+                  "required_within_days": 21, "justification": "SOP-SC-014 3.2 trigger rule"}],
         "approval_authority": "Head of Supply Chain Management",
         "policy_citations": [{"document": "SOP-SC-014_Supply_Disruption_Response.pdf", "page": 1, "clause": "3.2"}]}
 
