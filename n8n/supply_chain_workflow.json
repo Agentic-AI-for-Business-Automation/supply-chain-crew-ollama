@@ -1,0 +1,78 @@
+{
+  "name": "Supply Chain RFQ & Contingency Handler",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "supply-chain-rfq",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0001-4000-8000-000000000001",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "supply-chain-rfq-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Expects webhook body at $input.first().json.body (n8n Webhook node default).\n// Contract: action_type, severity, event_id, company, rfqs[], contingency_actions[], policy_citations[].\nconst raw = $input.first().json || {};\nconst p = raw.body ?? raw; // tolerate test-posts that omit the {body:} wrapper\nconst fmt = n => Number(n || 0).toLocaleString('en-IN');\nconst eventId = p.event_id || `SCD-MANUAL-${Date.now().toString().slice(-6)}`;\nconst rfqDocs = (Array.isArray(p.rfqs) ? p.rfqs : []).map((r, i) => {\n  const qty = Number(r.quantity || 0);\n  const price = Number(r.unit_price_inr || 0);\n  return {\n    rfq_number: `${eventId}-RFQ${String(i + 1).padStart(2, '0')}`,\n    to: r.supplier_email || `${r.supplier_id || 'unknown'}@supplier.example`,\n    subject: `Urgent RFQ ${r.part_id || '?'} x ${fmt(qty)} - ${p.company || 'Aravalli Mobility Pvt Ltd'}`,\n    body: `Dear ${r.supplier_name || r.supplier_id || 'Supplier'},\\n\\nPlease quote for ${fmt(qty)} units of ${r.part_id || '?'} ` +\n      `for delivery within ${r.required_within_days ?? '?'} days (CIF Nhava Sheva / DAP Manesar). ` +\n      `Quote validity 15 days; state lead time, MOQ and capacity commitment.\\n\\nReason: ${r.justification || 'per SOP-SC-014'}\\n\\nProcurement, ${p.company || 'Aravalli Mobility Pvt Ltd'}`,\n    est_value_inr: Number(r.est_value_inr ?? qty * price)\n  };\n});\nconst total = rfqDocs.reduce((s, r) => s + Number(r.est_value_inr || 0), 0);\nif (!['RFQ','CONTINGENCY_PLAN','MONITOR_ONLY'].includes(p.action_type)) {\n  throw new Error(`Invalid action_type '${p.action_type}'. Must be RFQ | CONTINGENCY_PLAN | MONITOR_ONLY.`);\n}\nreturn [{ json: {\n  status: 'RECEIVED',\n  event_id: eventId,\n  action_type: p.action_type || 'UNKNOWN',\n  severity: p.severity || 'UNKNOWN',\n  routed_for_approval_to: p.approval_authority || 'Head of Supply Chain Management',\n  rfqs_generated: rfqDocs.length,\n  total_rfq_value_inr: fmt(total),\n  total_rfq_value_raw: total,\n  rfq_documents: rfqDocs,\n  contingency_plan: Array.isArray(p.contingency_actions) ? p.contingency_actions : [],\n  citations_logged: Array.isArray(p.policy_citations) ? p.policy_citations.length : 0,\n  processed_at: new Date().toISOString()\n}}];\n"
+      },
+      "id": "a1b2c3d4-0002-4000-8000-000000000002",
+      "name": "Generate RFQs & Plan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0003-4000-8000-000000000003",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        480,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Generate RFQs & Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate RFQs & Plan": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "scmrfqworkflow0001"
+}

@@ -1,0 +1,11 @@
+crewai==1.15.23
+# NOTE: if using LLM_MODEL=gemini/... locally, install crewai[google-genai]==1.15.23 instead
+langchain-community
+psycopg2-binary
+chromadb
+pypdf
+ddgs
+requests
+python-dotenv
+reportlab   # Person 2 PDF generation (reproducible builds)
+pytest

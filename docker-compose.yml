@@ -1,0 +1,30 @@
+services:
+  erp-db:
+    image: postgres:16
+    container_name: erp-db
+    environment:
+      POSTGRES_USER: scm
+      POSTGRES_PASSWORD: scm
+      POSTGRES_DB: erp
+    ports: ["5432:5432"]
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - erp_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scm -d erp"]
+      interval: 5s
+      retries: 10
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    ports: ["5678:5678"]
+    environment:
+      GENERIC_TIMEZONE: Asia/Kolkata
+      N8N_SECURE_COOKIE: "false"
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+volumes:
+  erp_data:
+  n8n_data:
