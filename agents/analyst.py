@@ -61,7 +61,15 @@ if __name__ == "__main__":   # stand-alone test: python -m agents.analyst
    Sources: https://example.com/typhoon-taiwan-ports
 ## Verdict
 MATERIAL DISRUPTION FOUND"""
-    llm = LLM(model=os.getenv("LLM_MODEL", "openai/gpt-4o-mini"), temperature=0.1)
+    lllm = LLM(
+    model=os.getenv('OLLAMA_MODEL', 'qwen2.5:14b'),
+    provider="ollama",
+    base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+    api_key="ollama",
+    temperature=0.1,
+    timeout=int(os.getenv("LLM_TIMEOUT_S", "120")),
+    max_retries=int(os.getenv("LLM_RETRIES", "1")),
+)
     a = build_analyst_agent(llm)
     t = build_analyst_task(a)
     t.description = "SCOUT REPORT:\n" + SAMPLE_SCOUT + "\n\n" + t.description

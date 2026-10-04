@@ -63,7 +63,15 @@ if __name__ == "__main__":   # stand-alone test: python -m agents.scout
     from dotenv import load_dotenv
     from crewai import Crew, LLM
     load_dotenv()
-    llm = LLM(model=os.getenv("LLM_MODEL", "openai/gpt-4o-mini"), temperature=0.1)
+    llm = LLM(
+    model=os.getenv('OLLAMA_MODEL', 'qwen2.5:14b'),
+    provider="ollama",
+    base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+    api_key="ollama",
+    temperature=0.1,
+    timeout=int(os.getenv("LLM_TIMEOUT_S", "120")),
+    max_retries=int(os.getenv("LLM_RETRIES", "1")),
+)
     a = build_scout_agent(llm)
     crew = Crew(agents=[a], tasks=[build_scout_task(a)], verbose=True)
     out = crew.kickoff(inputs={

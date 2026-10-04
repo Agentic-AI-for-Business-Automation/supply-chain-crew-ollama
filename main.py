@@ -16,17 +16,26 @@ from tools.search_tool import enable_simulated_failure, reset_seen_urls
 from tools.n8n_tool import STATE, log
 
 LLM_TIMEOUT_S = int(os.getenv("LLM_TIMEOUT_S", "120"))   # per LLM call
-LLM_RETRIES = int(os.getenv("LLM_RETRIES", "4"))          # litellm backoff on 429/5xx
+LLM_RETRIES = int(os.getenv("LLM_RETRIES", "1"))          # litellm backoff on 429/5xx
 MAX_RPM = int(os.getenv("MAX_RPM", "20"))                 # crew-wide request cap
 AGENT_MAX_SECONDS = int(os.getenv("AGENT_MAX_SECONDS", "300"))
 
 
 def build_llm() -> LLM:
-    model = os.getenv("LLM_MODEL", "openai/gpt-4o-mini")
-    if model.startswith("ollama/"):
-        return LLM(model=model, base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-                   temperature=0.1, timeout=LLM_TIMEOUT_S, max_retries=LLM_RETRIES)
-    return LLM(model=model, temperature=0.1, timeout=LLM_TIMEOUT_S, max_retries=LLM_RETRIES)
+    """Build the application LLM using local Ollama only."""
+
+    model = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
+    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+
+    return LLM(
+        model=model,
+        provider="ollama",
+        base_url=base_url,
+        api_key="ollama",
+        temperature=0.1,
+        timeout=LLM_TIMEOUT_S,
+        max_retries=LLM_RETRIES,
+    )
 
 
 def run_once(focus: str, watch: bool = False, scout_report: str | None = None) -> None:
@@ -76,8 +85,7 @@ def run_once(focus: str, watch: bool = False, scout_report: str | None = None) -
     for a in (scout, analyst, coord):
         a.max_execution_time = AGENT_MAX_SECONDS
     # memory needs OpenAI embeddings (sends crew text to OpenAI) and carries old events into later watch cycles
-    use_memory = (os.getenv("ENABLE_MEMORY", "true").lower() == "true" and bool(os.getenv("OPENAI_API_KEY"))
-                  and not watch)
+    use_memory = False
     agents, tasks = ([analyst, coord], [analyst_task, coord_task]) if scout_report else ([scout, analyst, coord], [scout_task, analyst_task, coord_task])
     crew = Crew(agents=agents, tasks=tasks,
                 process=Process.sequential, memory=use_memory, max_rpm=MAX_RPM, verbose=True)
@@ -117,7 +125,7 @@ if __name__ == "__main__":
     ap.add_argument("--dry-run", action="store_true",
                     help="validate wiring (ERP watchlist + RAG index + payload schema) without calling the LLM")
     ap.add_argument("--scout-report", metavar="FILE", help="replay a saved Scout report (see samples/scout_typhoon.md) instead of searching the web")
-    ap.add_argument("--no-memory", action="store_true", help="disable CrewAI memory even if OPENAI_API_KEY is set")
+    ap.add_argument("--no-memory", action="store_true", help="compatibility flag; CrewAI memory is disabled in Ollama-only mode")
     ap.add_argument("--replay-dlq", "--replay-outbox", dest="replay_dlq", action="store_true",
                     help="retry queued deliveries from the dead-letter queue (and legacy outbox/ files), then exit")
     args = ap.parse_args()
